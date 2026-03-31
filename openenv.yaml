@@ -1,0 +1,108 @@
+name: jericho-debug-env
+version: "1.0.0"
+description: >
+  A code debugging environment where AI agents iteratively fix buggy Python
+  code by editing functions and running tests. Compatible with the OpenEnv spec.
+
+entrypoint: env.environment.DebugEnv
+
+observation:
+  type: object
+  schema: env.models.Observation
+  fields:
+    code:
+      type: string
+      description: Current state of the Python source code
+    tests_passed:
+      type: integer
+      description: Number of tests currently passing
+    tests_total:
+      type: integer
+      description: Total number of tests in the task
+    last_test_output:
+      type: string
+      description: stdout/stderr from the last pytest run
+    step_count:
+      type: integer
+      description: Number of steps taken in this episode
+    done:
+      type: boolean
+      description: Whether the episode has ended
+
+action:
+  type: object
+  schema: env.models.Action
+  fields:
+    type:
+      type: string
+      enum: [run_tests, edit_function]
+      description: The action to perform
+    function_name:
+      type: string
+      required: false
+      description: Name of the function to replace (edit_function only)
+    new_code:
+      type: string
+      required: false
+      description: Complete replacement function code (edit_function only)
+
+reward:
+  type: object
+  schema: env.models.Reward
+  fields:
+    value:
+      type: float
+      description: Scalar reward signal for the last step
+
+reward_structure:
+  step_penalty: -0.05
+  progress_reward: 1.0
+  regression_penalty: -0.5
+  all_pass_bonus: 2.0
+  break_code_penalty: -0.3
+
+episode:
+  max_steps: 20
+  termination:
+    - all tests passing
+    - max_steps reached
+
+tasks:
+  - id: easy
+    difficulty: easy
+    total_tests: 4
+    description: Fix a discount calculator with wrong operator and missing logic
+  - id: medium
+    difficulty: medium
+    total_tests: 5
+    description: Fix a stats calculator with wrong mean, variance and std_dev
+  - id: hard
+    difficulty: hard
+    total_tests: 10
+    description: Fix a payroll pipeline with cascading bugs across multiple functions
+
+api:
+  base_url: http://localhost:8000
+  endpoints:
+    reset:
+      method: POST
+      path: /env/reset
+    step:
+      method: POST
+      path: /env/step
+    state:
+      method: GET
+      path: /env/state/{session_id}
+    tasks:
+      method: GET
+      path: /tasks
+    grader:
+      method: POST
+      path: /grader/
+
+inference:
+  script: inference.py
+  env_vars:
+    API_BASE_URL: LLM API endpoint (e.g. https://router.huggingface.co/v1)
+    MODEL_NAME: Model identifier (e.g. meta-llama/Llama-3.3-70B-Instruct)
+    HF_TOKEN: HuggingFace API key
