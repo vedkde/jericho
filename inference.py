@@ -9,6 +9,11 @@ MANDATORY
 
 - The inference script must be named `inference.py` and placed in the root directory of the project
 - Participants must use OpenAI Client for all LLM calls using above variables
+
+STDOUT FORMAT
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
 """
 
 import os
@@ -25,36 +30,22 @@ API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 MODEL_NAME   = os.getenv("MODEL_NAME")
 
 BASE_URL     = os.getenv("ENV_BASE_URL", "http://localhost:8000")
+BENCHMARK    = "jericho-debug-env"
 
-# ── display helpers ────────────────────────────────────────────────
-DIVIDER = "─" * 60
-THIN    = "·" * 60
-BOLD    = "═" * 60
 
-def header(text):
-    print(f"\n{BOLD}\n  {text}\n{BOLD}")
+# ── logging helpers ────────────────────────────────────────────────
+def log_start(task: str, model: str):
+    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
 
-def subheader(text):
-    print(f"\n{DIVIDER}\n  {text}\n{DIVIDER}")
+def log_step(step: int, action: str, reward: float, done: bool, error: str = None):
+    error_str = error if error else "null"
+    done_str  = "true" if done else "false"
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}", flush=True)
 
-def row(label, value, indent=2):
-    print(f"{' ' * indent}{label:<22} {value}")
-
-def progress_bar(passed, total, width=24):
-    if total == 0:
-        return "[" + " " * width + "]  0/0"
-    filled = int(width * passed / total)
-    bar    = "█" * filled + "░" * (width - filled)
-    pct    = int(100 * passed / total)
-    return f"[{bar}]  {passed}/{total}  ({pct}%)"
-
-def result_label(passed, total):
-    if passed == total:
-        return "SOLVED"
-    elif passed == 0:
-        return "FAILING"
-    else:
-        return f"PARTIAL  ({passed}/{total})"
+def log_end(success: bool, steps: int, score: float, rewards: list):
+    success_str  = "true" if success else "false"
+    rewards_str  = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"[END] success={success_str} steps={steps} score={score:.2f} rewards={rewards_str}", flush=True)
 
 
 # ── LLM call via OpenAI client ─────────────────────────────────────
@@ -109,32 +100,25 @@ Example:
 
 # ── single episode ─────────────────────────────────────────────────
 def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
-    header(f"TASK  {task_id.upper()}")
+    log_start(task=task_id, model=MODEL_NAME)
 
     # fetch task metadata
     task_res = requests.get(f"{BASE_URL}/tasks/{task_id}")
     task_res.raise_for_status()
-    task_data  = task_res.json()
-    functions  = task_data.get("functions", [])
-    difficulty = task_data.get("difficulty", task_id)
-    desc       = task_data.get("description", "")
-
-    print(f"\n  {desc}\n")
-    row("Difficulty",  difficulty.upper())
-    row("Functions",   ", ".join(functions))
-    row("Total tests", str(task_data.get("total_tests", "?")))
+    task_data = task_res.json()
+    functions = task_data.get("functions", [])
 
     # reset environment
     res = requests.post(f"{BASE_URL}/env/reset", json={"session_id": session_id, "task_id": task_id})
     res.raise_for_status()
     state = res.json()["state"]
 
-    print(f"\n  {THIN}\n  INITIAL STATE\n  {THIN}")
-    row("Status", progress_bar(state["tests_passed"], state["tests_total"]))
-
+    all_rewards     = []
     total_reward    = 0.0
+    step_count      = 0
     attempt         = 1
     tried_functions = {}
+    last_error      = None
 
     # initial test run
     res = requests.post(f"{BASE_URL}/env/step", json={"session_id": session_id, "action": {"type": "run_tests"}})
@@ -142,12 +126,10 @@ def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
     data   = res.json()
     state  = data["state"]
     reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
+    step_count += 1
     total_reward += reward
-
-    row("Tests",  progress_bar(state["tests_passed"], state["tests_total"]))
-    row("Reward", f"{reward:+.2f}")
-
-    print(f"\n  {THIN}\n  AGENT LOOP\n  {THIN}")
+    all_rewards.append(reward)
+    log_step(step=step_count, action="run_tests", reward=reward, done=state["done"])
 
     # agent loop
     while not state["done"]:
@@ -168,18 +150,17 @@ def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
                 attempt=attempt,
                 extra_hint=stuck_hint,
             )
+            last_error = None
         except Exception as exc:
-            print(f"\n  [model error] {exc} — stopping episode.")
+            last_error = str(exc)
+            log_step(step=step_count + 1, action="ask_model", reward=0.00, done=False, error=last_error)
             break
 
         fn       = fix["function_name"]
         new_code = fix["new_code"]
         tried_functions[fn] = tried_functions.get(fn, 0) + 1
 
-        print(f"\n  Attempt {attempt}")
-        row("Targeting",   fn)
-        row("Times tried", f"{tried_functions[fn]}x")
-        row("Fix preview", new_code.split("\n")[0][:52].strip())
+        action_str = f"edit_function({fn})"
 
         # apply fix
         res = requests.post(f"{BASE_URL}/env/step", json={
@@ -187,13 +168,16 @@ def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
             "action": {"type": "edit_function", "function_name": fn, "new_code": new_code}
         })
         if res.status_code == 400:
-            print(f"\n  [step limit reached]")
+            log_step(step=step_count + 1, action=action_str, reward=0.00, done=True, error="step_limit_reached")
             break
         res.raise_for_status()
         data   = res.json()
         state  = data["state"]
         reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
+        step_count += 1
         total_reward += reward
+        all_rewards.append(reward)
+        log_step(step=step_count, action=action_str, reward=reward, done=state["done"])
 
         if state["done"]:
             break
@@ -204,32 +188,29 @@ def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
             "action": {"type": "run_tests"}
         })
         if res.status_code == 400:
-            print(f"\n  [step limit reached]")
+            log_step(step=step_count + 1, action="run_tests", reward=0.00, done=True, error="step_limit_reached")
             break
         res.raise_for_status()
         data   = res.json()
         state  = data["state"]
         reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
+        step_count += 1
         total_reward += reward
-
-        row("Result",  progress_bar(state["tests_passed"], state["tests_total"]))
-        row("Reward",  f"{reward:+.2f}")
-        row("Status",  result_label(state["tests_passed"], state["tests_total"]))
+        all_rewards.append(reward)
+        log_step(step=step_count, action="run_tests", reward=reward, done=state["done"])
 
         attempt += 1
 
     # grade final code
-    print(f"\n  {THIN}\n  GRADING\n  {THIN}")
     res = requests.post(f"{BASE_URL}/grader/", json={"task_id": task_id, "code": state["code"]})
     res.raise_for_status()
     grade = res.json()
 
-    row("Final score",   f"{grade['score']:.2f}  ({grade['passed']}/{grade['total']} tests)")
-    row("Total reward",  f"{round(total_reward, 2):+.2f}")
-    row("Attempts used", str(attempt - 1))
-    row("Outcome",       "PASSED" if grade["score"] == 1.0 else "INCOMPLETE")
+    score   = grade["score"]
+    success = score == 1.0
+    log_end(success=success, steps=step_count, score=score, rewards=all_rewards)
 
-    return grade["score"], attempt - 1, round(total_reward, 2)
+    return score, step_count, round(total_reward, 2)
 
 
 # ── main ───────────────────────────────────────────────────────────
@@ -243,39 +224,13 @@ def main() -> None:
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    start = time.time()
-
-    header("CODE DEBUGGING AGENT — INFERENCE RUN")
-    print(f"\n  Model     : {MODEL_NAME}")
-    print(f"  API base  : {API_BASE_URL}")
-    print(f"  Tasks     : easy  /  medium  /  hard")
-    print(f"  Max steps : 20 per episode\n")
-
     task_ids = ["easy", "medium", "hard"]
     results  = {}
 
     for i, task_id in enumerate(task_ids):
         session_id = f"inference-{task_id}-{i}"
-        score, attempts, reward = run_episode(client, task_id, session_id)
-        results[task_id] = {"score": score, "attempts": attempts, "reward": reward}
-
-    elapsed = round(time.time() - start, 1)
-
-    header("FINAL RESULTS")
-    print(f"\n  {'TASK':<12} {'SCORE':<10} {'ATTEMPTS':<12} {'REWARD':<12} {'OUTCOME'}")
-    print(f"  {DIVIDER}")
-
-    total_score = 0.0
-    for task_id, r in results.items():
-        outcome = "PASSED" if r["score"] == 1.0 else "INCOMPLETE"
-        print(f"  {task_id:<12} {r['score']:<10.2f} {r['attempts']:<12} {r['reward']:<12.2f} {outcome}")
-        total_score += r["score"]
-
-    avg = total_score / len(results)
-    print(f"  {THIN}")
-    print(f"  {'AVERAGE':<12} {avg:<10.2f}")
-    print(f"\n  Total runtime : {elapsed}s")
-    print(f"\n{BOLD}\n")
+        score, steps, reward = run_episode(client, task_id, session_id)
+        results[task_id] = {"score": score, "steps": steps, "reward": reward}
 
 
 if __name__ == "__main__":
