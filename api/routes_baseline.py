@@ -32,21 +32,51 @@ def run_baseline(req: BaselineRequest):
         "done": done
     })
 
-    # step 2 — apply the known solution and run tests
+    # step 2 — apply the known solution function by function
     if not done:
-        state, reward, done = env.step({
-            "type": "edit",
-            "new_code": task["solution_code"]
-        })
-        total_reward += reward
-        trajectory.append({
-            "step": state.step_count,
-            "action": "edit (apply solution)",
-            "tests_passed": state.tests_passed,
-            "reward": reward,
-            "done": done
-        })
+        solution_code = task["solution_code"]
+        functions     = task.get("functions", [])
 
+        import re
+        for fn_name in functions:
+            if done:
+                break
+
+            # extract the function body from solution_code
+            lines = solution_code.split("\n")
+            start_idx = None
+            for i, line in enumerate(lines):
+                if re.match(rf"^def {re.escape(fn_name)}\s*\(", line):
+                    start_idx = i
+                    break
+
+            if start_idx is None:
+                continue
+
+            end_idx = len(lines)
+            for i in range(start_idx + 1, len(lines)):
+                line = lines[i]
+                if line and not line[0].isspace() and line.strip() != "":
+                    end_idx = i
+                    break
+
+            fn_code = "\n".join(lines[start_idx:end_idx]).strip()
+
+            state, reward, done = env.step({
+                "type": "edit_function",
+                "function_name": fn_name,
+                "new_code": fn_code
+            })
+            total_reward += reward
+            trajectory.append({
+                "step": state.step_count,
+                "action": f"edit_function ({fn_name})",
+                "tests_passed": state.tests_passed,
+                "reward": reward,
+                "done": done
+            })
+
+    # step 3 — run tests after applying solution
     if not done:
         state, reward, done = env.step({"type": "run_tests"})
         total_reward += reward
