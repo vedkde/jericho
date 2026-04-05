@@ -1,91 +1,103 @@
+---
+title: Jericho
+emoji: 🐛
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 # Jericho – Debugging Environment
 
-A lightweight, OpenEnv-style reinforcement learning environment where AI agents learn to fix buggy Python code by interacting with an API.
+A lightweight OpenEnv-compatible RL environment where AI agents fix buggy Python code by interacting with a REST API.
 
 ## Overview
 
-This project provides a structured environment for training and evaluating code-fixing agents. Agents iteratively edit code and run tests, receiving rewards based on improvements in correctness.
-
-The system is designed to simulate real-world debugging workflows and supports multiple difficulty levels.
-
-## Features
-
-- REST API built with FastAPI
-- Step-based environment (reset, edit, run tests)
-- Reward function for reinforcement learning
-- Multiple tasks: easy, medium, hard
-- Pytest-based evaluation
-- Compatible with LLM agents (Gemini, Groq, etc.)
+Agents iteratively edit functions and run tests, receiving rewards based on improvements in correctness. Designed to simulate real-world debugging workflows across multiple difficulty levels.
 
 ## Project Structure
 
 ```
-api/            # FastAPI routes (env, tasks, grader, baseline)
-env/            # Core environment (state, executor, reward)
-tasks/          # Task definitions and registry
-agents/         # Agent scripts (Gemini, Groq, baseline)
-run.py          # Starts the API server
+api/        # FastAPI routes (env, tasks, grader, baseline)
+env/        # Core environment (state, executor, reward)
+tasks/      # Task definitions and registry
+run.py      # Starts the API server
+inference.py # Baseline inference script
+Dockerfile  # Container setup
 ```
 
-## Installation
+## Setup
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Running the Server
-
-```bash
 python run.py
 ```
 
-Server will start at:
-http://localhost:8000
+Server starts at `http://localhost:8000`
+
+## Docker
+
+```bash
+docker build -t jericho .
+docker run -p 8000:8000 jericho
+```
 
 ## API Endpoints
 
-- POST /env/reset — Initialize a new session with a task
-- POST /env/step — Take an action (edit or run tests)
-- GET  /env/state/{session_id} — Get current state
-- GET  /tasks — List available tasks
-- GET  /tasks/{task_id} — Get task details
-- POST /grader/ — Evaluate final code
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/env/reset` | Start a new session |
+| POST | `/env/step` | Take an action |
+| GET | `/env/state/{session_id}` | Get current state |
+| GET | `/tasks` | List all tasks |
+| GET | `/tasks/{task_id}` | Get task details |
+| POST | `/grader/` | Grade final code |
 
 ## Actions
 
-### Run Tests
 ```json
 { "type": "run_tests" }
 ```
-
-### Edit Code
 ```json
 {
   "type": "edit_function",
-  "function_name": "function_name",
-  "new_code": "def function_name(...): ..."
+  "function_name": "my_func",
+  "new_code": "def my_func(...): ..."
 }
 ```
 
 ## Reward System
 
-- Positive reward for passing more tests
-- Penalty for regressions or broken code
-- Small step penalty to encourage efficiency
-- Bonus for solving all tests
+| Event | Reward |
+|-------|--------|
+| Each step | -0.05 |
+| Test newly passing | +1.0 per test |
+| Regression | -0.5 per test broken |
+| All tests pass | +2.0 bonus |
+| Broken code | -0.3 |
 
 ## Tasks
 
-- Easy: Basic logic bugs
-- Medium: Mathematical/statistical errors
-- Hard: Multi-function pipeline with interacting bugs
+| Task | Tests | Description |
+|------|-------|-------------|
+| Easy | 4 | Wrong operator and missing logic in discount calculator |
+| Medium | 5 | Wrong mean, variance and std_dev in stats calculator |
+| Hard | 10 | Cascading bugs across a multi-function payroll pipeline |
 
-## Usage
+## Inference
 
-1. Start the server
-2. Run an agent script (e.g., Gemini or Groq)
-3. Agent interacts with environment:
-   - Runs tests
-   - Edits code
-   - Improves solution iteratively
-4. Final solution is graded
+```bash
+export API_BASE_URL=https://router.huggingface.co/v1
+export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+export HF_TOKEN=your_token
+python inference.py
+```
+
+## Baseline Scores
+
+| Task | Score | Steps |
+|------|-------|-------|
+| Easy | 1.00 | 5 |
+| Medium | 1.00 | 7 |
+| Hard | 0.90 | 20 |
