@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "jericho"
+version = "1.0.0"
+description = "A code debugging RL environment where AI agents fix buggy Python code."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "requests",
+    "openai",
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
