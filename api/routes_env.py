@@ -1,20 +1,22 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 from env import DebugEnv
 from env.state import EnvState
+import uuid
 
 router = APIRouter()
 
 # in-memory session store
-sessions: dict[str, DebugEnv] = {}
+sessions: dict = {}
 
 class ResetRequest(BaseModel):
-    session_id: str
     task_id: str
+    session_id: Optional[str] = None
 
 class StepRequest(BaseModel):
-    session_id: str
     action: dict
+    session_id: Optional[str] = None
 
 def state_to_dict(state: EnvState) -> dict:
     return {
@@ -29,11 +31,12 @@ def state_to_dict(state: EnvState) -> dict:
 @router.post("/reset")
 def reset(req: ResetRequest):
     try:
+        session_id = req.session_id or str(uuid.uuid4())
         env = DebugEnv()
         state = env.reset(req.task_id)
-        sessions[req.session_id] = env
+        sessions[session_id] = env
         return {
-            "session_id": req.session_id,
+            "session_id": session_id,
             "task_id": req.task_id,
             "state": state_to_dict(state)
         }
@@ -42,13 +45,20 @@ def reset(req: ResetRequest):
 
 @router.post("/step")
 def step(req: StepRequest):
-    env = sessions.get(req.session_id)
+    # if no session_id, use most recent session
+    session_id = req.session_id
+    if not session_id:
+        if not sessions:
+            raise HTTPException(status_code=404, detail="No active session. Call /reset first.")
+        session_id = list(sessions.keys())[-1]
+
+    env = sessions.get(session_id)
     if not env:
-        raise HTTPException(status_code=404, detail=f"Session '{req.session_id}' not found. Call /reset first.")
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found. Call /reset first.")
     try:
-        state, reward, done = env.step(req.action)
+        state, reward, done, info = env.step(req.action)
         return {
-            "session_id": req.session_id,
+            "session_id": session_id,
             "state": state_to_dict(state),
             "reward": reward,
             "done": done
