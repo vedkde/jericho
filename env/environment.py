@@ -63,7 +63,7 @@ class DebugEnv:
         reward_value = compute_reward(old_state, self.current_state)
         reward = Reward(value=reward_value)
 
-        return self._to_observation(self.current_state), reward, self.current_state.done
+        return self._to_observation(self.current_state), reward, self.current_state.done, {}
 
     def state(self) -> Observation:
         if self.current_state is None:
