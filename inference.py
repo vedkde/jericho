@@ -13,7 +13,7 @@ from openai import OpenAI
 
 API_BASE_URL  = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME    = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.3-70B-Instruct")
-HF_TOKEN      = os.getenv("HF_TOKEN",     "")
+HF_TOKEN      = os.getenv("HF_TOKEN")
 ENV_BASE_URL  = os.getenv("ENV_BASE_URL", "https://akkiisfrommars-jericho.hf.space")
 BENCHMARK     = "jericho"
 MAX_STEPS     = 20
