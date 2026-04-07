@@ -1,15 +1,3 @@
----
-title: Jericho
-emoji: 🐛
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 8000
-pinned: false
-tags:
-  - openenv
----
-
 # Jericho – Debugging Environment
 
 A lightweight OpenEnv-compatible RL environment where AI agents fix buggy Python code by interacting with a REST API.
