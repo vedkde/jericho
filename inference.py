@@ -1,236 +1,264 @@
-"""
-Inference Script — Code Debugging Agent
-===================================
-MANDATORY
-- Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
-    MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
-
-- The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
-
-STDOUT FORMAT
-    [START] task=<task_name> env=<benchmark> model=<model_name>
-    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
-    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
-"""
+from __future__ import annotations
 
 import os
 import sys
+import uuid
 import json
-import time
+import re
 import requests
-
+from typing import Optional, List
 from openai import OpenAI
 
-# ── env vars ───────────────────────────────────────────────────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME   = os.getenv("MODEL_NAME")
+# ── config ────────────────────────────────────────────────────────────────────
 
-BASE_URL     = os.getenv("ENV_BASE_URL", "http://localhost:8000")
-BENCHMARK    = "jericho-debug-env"
+API_BASE_URL  = os.environ.get("API_BASE_URL",  "https://router.huggingface.co/v1")
+MODEL_NAME    = os.environ.get("MODEL_NAME",    "meta-llama/Llama-3.3-70B-Instruct")
+HF_TOKEN      = os.environ.get("HF_TOKEN",      "")
+ENV_BASE_URL  = os.environ.get("ENV_BASE_URL",  "http://localhost:8000")
+
+MAX_STEPS     = 20
+TASKS         = ["easy", "medium", "hard"]
+
+if not HF_TOKEN:
+    print("ERROR: HF_TOKEN environment variable is not set.")
+    sys.exit(1)
+
+client = OpenAI(
+    base_url=API_BASE_URL,
+    api_key=HF_TOKEN,
+)
+
+# ── environment helpers ───────────────────────────────────────────────────────
+
+def env_reset(session_id: str, task_id: str) -> dict:
+    resp = requests.post(f"{ENV_BASE_URL}/env/reset", json={
+        "session_id": session_id,
+        "task_id": task_id
+    })
+    resp.raise_for_status()
+    return resp.json()["state"]
 
 
-# ── logging helpers ────────────────────────────────────────────────
-def log_start(task: str, model: str):
-    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
-
-def log_step(step: int, action: str, reward: float, done: bool, error: str = None):
-    error_str = error if error else "null"
-    done_str  = "true" if done else "false"
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_str} error={error_str}", flush=True)
-
-def log_end(success: bool, steps: int, score: float, rewards: list):
-    success_str  = "true" if success else "false"
-    rewards_str  = ",".join(f"{r:.2f}" for r in rewards)
-    print(f"[END] success={success_str} steps={steps} score={score:.2f} rewards={rewards_str}", flush=True)
+def env_step(session_id: str, action: dict):
+    resp = requests.post(f"{ENV_BASE_URL}/env/step", json={
+        "session_id": session_id,
+        "action": action
+    })
+    resp.raise_for_status()
+    data = resp.json()
+    reward = data["reward"]
+    if isinstance(reward, dict):
+        reward = reward["value"]
+    return data["state"], float(reward), data["done"]
 
 
-# ── LLM call via OpenAI client ─────────────────────────────────────
-def ask_model(client: OpenAI, code: str, test_output: str, functions: list, attempt: int, extra_hint: str = "") -> dict:
-    prompt = f"""You are a Python debugging assistant.
+def env_grade(task_id: str, code: str) -> dict:
+    resp = requests.post(f"{ENV_BASE_URL}/grader/", json={
+        "task_id": task_id,
+        "code": code
+    })
+    resp.raise_for_status()
+    return resp.json()
 
-You are given buggy Python code and failing test output.
-You must fix ONE function at a time per response.
 
-AVAILABLE FUNCTIONS: {functions}
+def get_task_info(task_id: str) -> dict:
+    resp = requests.get(f"{ENV_BASE_URL}/tasks/{task_id}")
+    resp.raise_for_status()
+    return resp.json()
 
-CURRENT CODE:
-{code}
+# ── LLM helpers ───────────────────────────────────────────────────────────────
 
-TEST OUTPUT:
-{test_output}
-{extra_hint}
+SYSTEM_PROMPT = """You are an expert Python debugger. You will be given buggy Python code and test failure output.
 
-Instructions:
-- Carefully read ALL the test failures before deciding which function to fix
-- Pick the ONE function most likely causing the remaining failures
-- Return ONLY a JSON object with exactly two keys:
-  - "function_name": the name of the function you are fixing
-  - "new_code": the complete fixed function code as a string, no markdown, no fences
-- Do not explain anything
-- Do not fix multiple functions at once
-- Return raw JSON only
+Your job is to fix ONE function at a time. When you decide which function to fix, respond in this exact JSON format:
 
-Example:
-{{"function_name": "compute_total", "new_code": "def compute_total(x, y):\\n    return x + y"}}
+{
+  "function_name": "the_function_to_fix",
+  "fixed_code": "def the_function_to_fix(...):\\n    # complete corrected function body here"
+}
+
+Rules:
+- Output ONLY valid JSON. No explanation, no markdown, no code fences.
+- The fixed_code must be a complete function definition starting with def.
+- Fix only ONE function per response.
+- Choose the function most likely causing current test failures.
+- If all tests pass, output: {"done": true}
 """
 
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": "You are a Python debugging assistant. Return only raw JSON."},
-            {"role": "user",   "content": prompt}
-        ],
-        temperature=0.1,
-        max_tokens=1024,
-        stream=False,
-    )
+def ask_llm(code: str, test_output: str, functions: List[str], tests_passed: int, tests_total: int) -> Optional[dict]:
+    user_message = f"""Current code:
+{code}
 
-    raw = response.choices[0].message.content.strip()
+Test results: {tests_passed}/{tests_total} passing
 
-    # strip markdown fences if model added them
-    if "```" in raw:
-        raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("```")).strip()
+Test output:
+{test_output[-3000:] if len(test_output) > 3000 else test_output}
 
-    return json.loads(raw)
+Available functions to fix: {functions}
 
+Which single function should be fixed, and what is the corrected version?"""
 
-# ── single episode ─────────────────────────────────────────────────
-def run_episode(client: OpenAI, task_id: str, session_id: str) -> tuple:
-    log_start(task=task_id, model=MODEL_NAME)
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message}
+            ],
+            max_tokens=1024,
+            temperature=0.2,
+        )
 
-    # fetch task metadata
-    task_res = requests.get(f"{BASE_URL}/tasks/{task_id}")
-    task_res.raise_for_status()
-    task_data = task_res.json()
-    functions = task_data.get("functions", [])
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
 
-    # reset environment
-    res = requests.post(f"{BASE_URL}/env/reset", json={"session_id": session_id, "task_id": task_id})
-    res.raise_for_status()
-    state = res.json()["state"]
+        return json.loads(raw)
 
-    all_rewards     = []
-    total_reward    = 0.0
-    step_count      = 0
-    attempt         = 1
-    tried_functions = {}
-    last_error      = None
+    except json.JSONDecodeError as e:
+        print(f"    [LLM] JSON parse error: {e}")
+        return None
+    except Exception as e:
+        print(f"    [LLM] API error: {e}")
+        return None
 
-    # initial test run
-    res = requests.post(f"{BASE_URL}/env/step", json={"session_id": session_id, "action": {"type": "run_tests"}})
-    res.raise_for_status()
-    data   = res.json()
-    state  = data["state"]
-    reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
-    step_count += 1
-    total_reward += reward
-    all_rewards.append(reward)
-    log_step(step=step_count, action="run_tests", reward=reward, done=state["done"])
+# ── agent loop ────────────────────────────────────────────────────────────────
 
-    # agent loop
-    while not state["done"]:
-        stuck_hint = ""
-        stuck = [f for f, c in tried_functions.items() if c >= 2]
-        if stuck:
-            stuck_hint = (
-                f"\nWARNING: You already tried fixing {stuck} multiple times with no progress. "
-                f"You MUST target a completely different function."
-            )
+def run_task(task_id: str) -> dict:
+    print(f"\n{'='*55}")
+    print(f"  Task: {task_id.upper()}")
+    print(f"{'='*55}")
 
+    session_id = f"{task_id}-{uuid.uuid4().hex[:8]}"
+    task_info  = get_task_info(task_id)
+    functions  = task_info.get("functions", [])
+
+    print(f"  Description : {task_info['description']}")
+    print(f"  Total tests : {task_info['total_tests']}")
+    print(f"  Functions   : {functions}")
+
+    state = env_reset(session_id, task_id)
+    print(f"\n  [reset] tests={state['tests_passed']}/{state['tests_total']} step=0")
+
+    state, reward, done = env_step(session_id, {"type": "run_tests"})
+    print(f"  [step 1] run_tests -> {state['tests_passed']}/{state['tests_total']} passing  reward={reward:.2f}")
+
+    total_reward = reward
+    trajectory   = []
+
+    while not done and state["step_count"] < MAX_STEPS:
+        if state["tests_passed"] == state["tests_total"]:
+            break
+
+        print(f"\n  [step {state['step_count']}] asking LLM...")
+
+        llm_response = ask_llm(
+            code         = state["code"],
+            test_output  = state["last_test_output"],
+            functions    = functions,
+            tests_passed = state["tests_passed"],
+            tests_total  = state["tests_total"],
+        )
+
+        if llm_response is None:
+            print("    LLM returned invalid response, skipping.")
+            state, reward, done = env_step(session_id, {"type": "run_tests"})
+            total_reward += reward
+            continue
+
+        if llm_response.get("done"):
+            print("    LLM says it is done.")
+            break
+
+        fn_name = llm_response.get("function_name")
+        fn_code = llm_response.get("fixed_code")
+
+        if not fn_name or not fn_code:
+            print("    LLM response missing fields, skipping.")
+            state, reward, done = env_step(session_id, {"type": "run_tests"})
+            total_reward += reward
+            continue
+
+        print(f"    LLM chose to fix: {fn_name}")
+
+        state, reward, done = env_step(session_id, {
+            "type":          "edit_function",
+            "function_name": fn_name,
+            "new_code":      fn_code,
+        })
+        total_reward += reward
+        print(f"    [edit] reward={reward:.2f}  tests={state['tests_passed']}/{state['tests_total']}")
+
+        trajectory.append({
+            "step":         state["step_count"],
+            "function":     fn_name,
+            "tests_passed": state["tests_passed"],
+            "reward":       reward,
+        })
+
+        if not done:
+            state, reward, done = env_step(session_id, {"type": "run_tests"})
+            total_reward += reward
+            print(f"    [tests] reward={reward:.2f}  tests={state['tests_passed']}/{state['tests_total']}  done={done}")
+
+    grade = env_grade(task_id, state["code"])
+    score = grade["score"]
+
+    print(f"\n  -- Final result --")
+    print(f"  Score        : {score:.4f}  ({grade['passed']}/{grade['total']} tests)")
+    print(f"  Total reward : {total_reward:.4f}")
+    print(f"  Steps taken  : {state['step_count']}")
+    print(f"  Done         : {done}")
+
+    return {
+        "task_id":      task_id,
+        "score":        score,
+        "passed":       grade["passed"],
+        "total":        grade["total"],
+        "total_reward": round(total_reward, 4),
+        "steps":        state["step_count"],
+        "done":         done,
+        "trajectory":   trajectory,
+    }
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    print("\nJericho -- Baseline Inference")
+    print(f"Model      : {MODEL_NAME}")
+    print(f"API base   : {API_BASE_URL}")
+    print(f"Env base   : {ENV_BASE_URL}")
+    print(f"Tasks      : {TASKS}")
+
+    results = []
+    for task_id in TASKS:
         try:
-            fix = ask_model(
-                client=client,
-                code=state["code"],
-                test_output=state["last_test_output"],
-                functions=functions,
-                attempt=attempt,
-                extra_hint=stuck_hint,
-            )
-            last_error = None
-        except Exception as exc:
-            last_error = str(exc)
-            log_step(step=step_count + 1, action="ask_model", reward=0.00, done=False, error=last_error)
-            break
+            result = run_task(task_id)
+            results.append(result)
+        except Exception as e:
+            print(f"\nERROR on task '{task_id}': {e}")
+            results.append({"task_id": task_id, "score": 0.0, "error": str(e)})
 
-        fn       = fix["function_name"]
-        new_code = fix["new_code"]
-        tried_functions[fn] = tried_functions.get(fn, 0) + 1
+    print(f"\n{'='*55}")
+    print("  SUMMARY")
+    print(f"{'='*55}")
+    print(f"  {'Task':<10} {'Score':>8}  {'Passed':>8}  {'Steps':>6}")
+    print(f"  {'-'*44}")
+    for r in results:
+        if "error" in r:
+            print(f"  {r['task_id']:<10} {'ERROR':>8}  {r.get('error','')[:20]}")
+        else:
+            passed_str = f"{r['passed']}/{r['total']}"
+            print(f"  {r['task_id']:<10} {r['score']:>8.4f}  {passed_str:>8}  {r['steps']:>6}")
 
-        action_str = f"edit_function({fn})"
+    avg_score = sum(r.get("score", 0) for r in results) / len(results)
+    print(f"\n  Average score: {avg_score:.4f}")
+    print(f"{'='*55}\n")
 
-        # apply fix
-        res = requests.post(f"{BASE_URL}/env/step", json={
-            "session_id": session_id,
-            "action": {"type": "edit_function", "function_name": fn, "new_code": new_code}
-        })
-        if res.status_code == 400:
-            log_step(step=step_count + 1, action=action_str, reward=0.00, done=True, error="step_limit_reached")
-            break
-        res.raise_for_status()
-        data   = res.json()
-        state  = data["state"]
-        reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
-        step_count += 1
-        total_reward += reward
-        all_rewards.append(reward)
-        log_step(step=step_count, action=action_str, reward=reward, done=state["done"])
-
-        if state["done"]:
-            break
-
-        # run tests after fix
-        res = requests.post(f"{BASE_URL}/env/step", json={
-            "session_id": session_id,
-            "action": {"type": "run_tests"}
-        })
-        if res.status_code == 400:
-            log_step(step=step_count + 1, action="run_tests", reward=0.00, done=True, error="step_limit_reached")
-            break
-        res.raise_for_status()
-        data   = res.json()
-        state  = data["state"]
-        reward = data["reward"]["value"] if isinstance(data["reward"], dict) else data["reward"]
-        step_count += 1
-        total_reward += reward
-        all_rewards.append(reward)
-        log_step(step=step_count, action="run_tests", reward=reward, done=state["done"])
-
-        attempt += 1
-
-    # grade final code
-    res = requests.post(f"{BASE_URL}/grader/", json={"task_id": task_id, "code": state["code"]})
-    res.raise_for_status()
-    grade = res.json()
-
-    score   = grade["score"]
-    success = score == 1.0
-    log_end(success=success, steps=step_count, score=score, rewards=all_rewards)
-
-    return score, step_count, round(total_reward, 2)
-
-
-# ── main ───────────────────────────────────────────────────────────
-def main() -> None:
-    if not API_KEY:
-        print("ERROR: HF_TOKEN or API_KEY environment variable is not set.")
-        sys.exit(1)
-    if not MODEL_NAME:
-        print("ERROR: MODEL_NAME environment variable is not set.")
-        sys.exit(1)
-
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    task_ids = ["easy", "medium", "hard"]
-    results  = {}
-
-    for i, task_id in enumerate(task_ids):
-        session_id = f"inference-{task_id}-{i}"
-        score, steps, reward = run_episode(client, task_id, session_id)
-        results[task_id] = {"score": score, "steps": steps, "reward": reward}
+    out_path = "baseline_results.json"
+    with open(out_path, "w") as f:
+        json.dump({"model": MODEL_NAME, "tasks": results, "average": round(avg_score, 4)}, f, indent=2)
+    print(f"Results saved to {out_path}")
 
 
 if __name__ == "__main__":
