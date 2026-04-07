@@ -14,14 +14,21 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# prefixed routes (original)
 app.include_router(env_router,      prefix="/env",      tags=["Environment"])
 app.include_router(tasks_router,    prefix="/tasks",    tags=["Tasks"])
 app.include_router(grader_router,   prefix="/grader",   tags=["Grader"])
 app.include_router(baseline_router, prefix="/baseline", tags=["Baseline"])
 
+# root-level routes (for OpenEnv checker)
+app.include_router(env_router,   tags=["OpenEnv"])
+app.include_router(tasks_router, tags=["OpenEnv"])
+app.include_router(grader_router, tags=["OpenEnv"])
+
 @app.get("/")
 def root():
     return {
         "status": "ok",
-        "endpoints": ["/tasks", "/env/reset", "/env/step", "/env/state", "/grader", "/baseline"]
+        "endpoints": ["/tasks", "/env/reset", "/env/step", "/env/state", "/grader", "/baseline",
+                      "/reset", "/step", "/state"]
     }
