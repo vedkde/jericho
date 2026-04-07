@@ -7,7 +7,7 @@ name = "jericho"
 version = "1.0.0"
 description = "A code debugging RL environment where AI agents fix buggy Python code."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "openenv-core>=0.2.0",
     "fastapi>=0.100.0",
