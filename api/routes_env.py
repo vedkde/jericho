@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 from env import DebugEnv
@@ -7,16 +7,8 @@ import uuid
 
 router = APIRouter()
 
-# in-memory session store
 sessions: dict = {}
-
-class ResetRequest(BaseModel):
-    task_id: str
-    session_id: Optional[str] = None
-
-class StepRequest(BaseModel):
-    action: dict
-    session_id: Optional[str] = None
+_default_session_id = "default"
 
 def state_to_dict(state: EnvState) -> dict:
     return {
@@ -29,34 +21,46 @@ def state_to_dict(state: EnvState) -> dict:
     }
 
 @router.post("/reset")
-def reset(req: ResetRequest):
+async def reset(request: Request):
     try:
-        session_id = req.session_id or str(uuid.uuid4())
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    task_id = body.get("task_id", "easy")
+    session_id = body.get("session_id") or str(uuid.uuid4())
+
+    try:
         env = DebugEnv()
-        state = env.reset(req.task_id)
+        state = env.reset(task_id)
         sessions[session_id] = env
+        sessions[_default_session_id] = env
         return {
             "session_id": session_id,
-            "task_id": req.task_id,
+            "task_id": task_id,
             "state": state_to_dict(state)
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/step")
-def step(req: StepRequest):
-    # if no session_id, use most recent session
-    session_id = req.session_id
-    if not session_id:
-        if not sessions:
-            raise HTTPException(status_code=404, detail="No active session. Call /reset first.")
-        session_id = list(sessions.keys())[-1]
+async def step(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    session_id = body.get("session_id", _default_session_id)
+    action = body.get("action", {"type": "run_tests"})
 
     env = sessions.get(session_id)
     if not env:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found. Call /reset first.")
+        env = sessions.get(_default_session_id)
+    if not env:
+        raise HTTPException(status_code=404, detail="No active session. Call /reset first.")
+
     try:
-        state, reward, done, info = env.step(req.action)
+        state, reward, done, info = env.step(action)
         return {
             "session_id": session_id,
             "state": state_to_dict(state),
