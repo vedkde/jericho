@@ -24,7 +24,10 @@ def grade(req: GraderRequest):
 
     total = task["total_tests"]
     passed = result["passed"]
-    score = round(passed / total, 4) if total > 0 else 0.0
+    raw_score = round(passed / total, 4) if total > 0 else 0.0
+
+    # score must be strictly between (0, 1) — never exactly 0.0 or 1.0
+    score = max(0.0001, min(raw_score, 0.9999))
 
     return {
         "task_id": req.task_id,
